@@ -4,6 +4,7 @@
   "description": "MCP server for Freshdesk — read tickets, conversations, and add private notes",
   "main": "index.js",
   "type": "module",
+  "license": "MIT",
   "scripts": {
     "start": "node index.js"
   },
