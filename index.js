@@ -57,30 +57,140 @@ async function freshdesk(path, { method = "GET", body, query } = {}) {
   return data;
 }
 
-// Strip noisy fields to keep context manageable.
-function slimTicket(t) {
+// Trim quoted reply chains, forwarded message blocks, and signature delimiters
+// from plain-text email bodies. Heuristic — falls back to the original text if
+// no marker is found. Use mode="full" upstream when this might over-trim.
+function stripQuotedReply(text) {
+  if (!text || typeof text !== "string") return text;
+  const lines = text.split(/\r?\n/);
+  let cutAt = lines.length;
+
+  for (let i = 0; i < lines.length; i++) {
+    const trimmed = lines[i].trim();
+
+    // Gmail/Apple Mail: "On <date>, <name> wrote:" (single line)
+    if (/^On\b.{1,300}\bwrote:\s*$/.test(trimmed)) {
+      cutAt = i;
+      break;
+    }
+    // Same, split across two lines: "On <date>...\n<name> wrote:"
+    if (/^On\b.{1,300}$/.test(trimmed) && i + 1 < lines.length) {
+      if (/wrote:\s*$/.test(lines[i + 1].trim())) {
+        cutAt = i;
+        break;
+      }
+    }
+    // Outlook: "-----Original Message-----"
+    if (/^-{2,}\s*Original Message\s*-{2,}/i.test(trimmed)) {
+      cutAt = i;
+      break;
+    }
+    // Outlook divider line of underscores
+    if (/^_{10,}\s*$/.test(trimmed)) {
+      cutAt = i;
+      break;
+    }
+    // Outlook header block: "From: ..." followed by Sent/Date/To within 4 lines
+    if (/^From:\s/i.test(trimmed)) {
+      const lookahead = lines.slice(i + 1, i + 5).join("\n");
+      if (/^(Sent|Date|To):\s/im.test(lookahead)) {
+        cutAt = i;
+        break;
+      }
+    }
+    // RFC 3676 signature delimiter
+    if (trimmed === "--") {
+      cutAt = i;
+      break;
+    }
+  }
+
+  return lines.slice(0, cutAt).join("\n").trimEnd();
+}
+
+function slimTicket(t, { mode = "slim" } = {}) {
   if (!t) return t;
   const {
     description, // keep description_text instead
     attachments,
     custom_fields,
+    description_text,
     ...rest
   } = t;
-  return {
+  const base = {
     ...rest,
+    description_text:
+      mode === "full" ? description_text : stripQuotedReply(description_text),
     has_attachments: Array.isArray(attachments) && attachments.length > 0,
     attachment_count: Array.isArray(attachments) ? attachments.length : 0,
     custom_fields: custom_fields && Object.keys(custom_fields).length ? custom_fields : undefined,
   };
+  if (mode === "full") return base;
+
+  // Slim mode: drop routing/metadata noise that is rarely needed for understanding the ticket.
+  const {
+    to_emails,
+    cc_emails,
+    bcc_emails,
+    fwd_emails,
+    reply_cc_emails,
+    support_email,
+    source_additional_info,
+    email_config_id,
+    product_id,
+    internal_agent_id,
+    internal_group_id,
+    nr_due_by,
+    nr_escalated,
+    fr_escalated,
+    is_escalated,
+    sentiment_score,
+    initial_sentiment_score,
+    association_type,
+    associated_tickets_list,
+    ...slimmed
+  } = base;
+  return slimmed;
 }
 
-function slimConversation(c) {
+function slimConversation(c, { mode = "slim" } = {}) {
   if (!c) return c;
-  const { body, attachments, ...rest } = c;
-  return {
+  const { body, attachments, body_text, ...rest } = c;
+  const base = {
     ...rest,
+    body_text: mode === "full" ? body_text : stripQuotedReply(body_text),
     has_attachments: Array.isArray(attachments) && attachments.length > 0,
     attachment_count: Array.isArray(attachments) ? attachments.length : 0,
+  };
+  if (mode === "full") return base;
+
+  // Slim mode: keep only fields that matter for following the conversation.
+  const {
+    id,
+    user_id,
+    from_email,
+    private: isPrivate,
+    incoming,
+    source,
+    category,
+    ticket_id,
+    created_at,
+    updated_at,
+  } = base;
+  return {
+    id,
+    user_id,
+    from_email,
+    private: isPrivate,
+    incoming,
+    source,
+    category,
+    ticket_id,
+    created_at,
+    ...(updated_at && updated_at !== created_at ? { updated_at } : {}),
+    body_text: base.body_text,
+    has_attachments: base.has_attachments,
+    attachment_count: base.attachment_count,
   };
 }
 
@@ -95,28 +205,39 @@ const server = new McpServer({
   version: "0.1.0",
 });
 
+const MODE_GUIDANCE =
+  "Defaults to 'slim': drops routing metadata (cc/bcc/support_email/etc.) and trims quoted reply chains and signatures from message bodies to keep context small. If the slim version is hard to follow — e.g. a reply seems to reference text you can't see, you need the full CC list, or the thread doesn't make sense — retry the same call with mode='full' to get untrimmed bodies and all metadata.";
+
 server.registerTool(
   "get_ticket",
   {
     title: "Get Freshdesk ticket",
     description:
-      "Fetch a single ticket by ID. By default also pulls requester, stats, and company. Set include_conversations=true to also fetch all comments/emails in one call.",
+      "Fetch a single ticket by ID. By default also pulls requester, stats, and company. Set include_conversations=true to also fetch all comments/emails in one call. " +
+      MODE_GUIDANCE,
     inputSchema: {
       ticket_id: z.number().int().describe("Freshdesk ticket ID"),
       include_conversations: z
         .boolean()
         .optional()
         .describe("Also fetch conversations (comments + emails). Default false."),
+      mode: z
+        .enum(["slim", "full"])
+        .optional()
+        .describe("'slim' (default) trims metadata and quoted reply chains. 'full' returns everything — use as a fallback when slim drops context you need."),
     },
   },
-  async ({ ticket_id, include_conversations }) => {
+  async ({ ticket_id, include_conversations, mode }) => {
+    const m = mode ?? "slim";
     const ticket = await freshdesk(`/tickets/${ticket_id}`, {
       query: { include: "requester,stats,company" },
     });
-    const result = { ticket: slimTicket(ticket) };
+    const result = { ticket: slimTicket(ticket, { mode: m }) };
     if (include_conversations) {
       const convos = await freshdesk(`/tickets/${ticket_id}/conversations`);
-      result.conversations = Array.isArray(convos) ? convos.map(slimConversation) : convos;
+      result.conversations = Array.isArray(convos)
+        ? convos.map((c) => slimConversation(c, { mode: m }))
+        : convos;
     }
     return asText(result);
   }
@@ -127,17 +248,25 @@ server.registerTool(
   {
     title: "Get ticket conversations",
     description:
-      "Fetch all conversations (customer replies, agent replies, public/private notes, outgoing emails) for a ticket. Paginated — use page for tickets with >30 items.",
+      "Fetch all conversations (customer replies, agent replies, public/private notes, outgoing emails) for a ticket. Paginated — use page for tickets with >30 items. " +
+      MODE_GUIDANCE,
     inputSchema: {
       ticket_id: z.number().int().describe("Freshdesk ticket ID"),
       page: z.number().int().optional().describe("1-based page (default 1, 30 per page)"),
+      mode: z
+        .enum(["slim", "full"])
+        .optional()
+        .describe("'slim' (default) trims metadata and quoted reply chains. 'full' returns everything — use as a fallback when slim drops context you need."),
     },
   },
-  async ({ ticket_id, page }) => {
+  async ({ ticket_id, page, mode }) => {
+    const m = mode ?? "slim";
     const convos = await freshdesk(`/tickets/${ticket_id}/conversations`, {
       query: { page },
     });
-    return asText(Array.isArray(convos) ? convos.map(slimConversation) : convos);
+    return asText(
+      Array.isArray(convos) ? convos.map((c) => slimConversation(c, { mode: m })) : convos
+    );
   }
 );
 
