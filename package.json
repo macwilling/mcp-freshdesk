@@ -5,8 +5,12 @@
   "main": "index.js",
   "type": "module",
   "license": "MIT",
+  "bin": {
+    "mcp-freshdesk": "./bin/mcp-freshdesk.js"
+  },
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "install-claude": "node bin/mcp-freshdesk.js install"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.28.0",

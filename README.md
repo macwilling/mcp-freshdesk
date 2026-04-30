@@ -1,6 +1,6 @@
 # mcp-freshdesk
 
-A [Model Context Protocol](https://modelcontextprotocol.io) server for [Freshdesk](https://freshdesk.com). Lets Claude (or any MCP client) read tickets, conversations, and add notes.
+An MCP server for [Freshdesk](https://freshdesk.com). Lets Claude (or any MCP client) read tickets, conversations, and add notes.
 
 Runs locally as a stdio subprocess.
 
@@ -14,49 +14,37 @@ Runs locally as a stdio subprocess.
 | `search_tickets` | Query using Freshdesk filter syntax, e.g. `status:2 AND priority:4`. |
 | `add_note` | Add a note to a ticket. Defaults to private (agents only). |
 
-Responses are slimmed to save context: HTML bodies are stripped in favor of `_text` variants, and attachment payloads are replaced with `has_attachments` / `attachment_count`.
+Responses are trimmed by default to keep context manageable on long tickets — see [Response trimming](#response-trimming).
 
-### Slim vs full mode
+## Install
 
-`get_ticket` and `get_ticket_conversations` accept a `mode` parameter (default `"slim"`). On heavy tickets with dozens of replies, slim mode is what keeps the response from blowing past usable context.
-
-In slim mode:
-
-- **Quoted reply chains and signatures are trimmed** from `body_text` / `description_text`. The trim recognizes Gmail/Apple Mail (`On <date>, <name> wrote:`), Outlook (`-----Original Message-----`, `From:`/`Sent:`/`To:` blocks, underscore dividers), and the RFC 3676 `--` signature delimiter.
-- **Routing metadata is dropped** — `to_emails`, `cc_emails`, `bcc_emails`, `support_email`, `source_additional_info`, escalation flags, sentiment scores, and other rarely-needed fields.
-
-Pass `mode: "full"` to bypass both — bodies are returned untrimmed and all metadata is preserved. The tool descriptions instruct the model to retry with full mode automatically when the slim version is missing context (e.g. a reply references text that isn't visible, or the full CC list is needed).
-
-The trim is heuristic. If your team uses an email client that produces a reply marker not in the list above, slim mode may leave the quoted chain intact — falling back to full mode is harmless.
-
-## Setup
-
-### 1. Install
+### Interactive (recommended)
 
 ```bash
 git clone https://github.com/macwilling/mcp-freshdesk.git
 cd mcp-freshdesk
 npm install
+npm run install-claude
 ```
 
-### 2. Configure
+The installer prompts for your Freshdesk domain and API key, validates them against the Freshdesk API, writes `.env`, and offers to register the server with Claude Code via `claude mcp add`. Re-run any time to rotate credentials.
 
-Copy the example env file and fill it in:
-
-```bash
-cp .env.example .env
-```
-
-```
-FRESHDESK_DOMAIN=yourcompany.freshdesk.com
-FRESHDESK_API_KEY=your_api_key_here
-```
+You can also invoke it directly: `node bin/mcp-freshdesk.js install`.
 
 Your API key is at **Profile Settings → View API Key** in Freshdesk.
 
-### 3. Register with your MCP client
+### Manual
 
-**Claude Code** (available in every project):
+If you'd rather configure by hand:
+
+```bash
+git clone https://github.com/macwilling/mcp-freshdesk.git
+cd mcp-freshdesk
+npm install
+cp .env.example .env   # then fill in FRESHDESK_DOMAIN and FRESHDESK_API_KEY
+```
+
+**Claude Code:**
 
 ```bash
 claude mcp add freshdesk --scope user -- node /absolute/path/to/mcp-freshdesk/index.js
@@ -77,7 +65,30 @@ claude mcp add freshdesk --scope user -- node /absolute/path/to/mcp-freshdesk/in
 
 Restart the client. In Claude Code, verify with `/mcp`.
 
-## Freshdesk query reference
+## Safety
+
+This server is intentionally narrow:
+
+- `add_note` defaults to `private: true`. Pass `private: false` explicitly to post a customer-visible note.
+- It exposes **read + add-note only** — no ticket creation, status changes, customer replies, or deletes.
+
+## Reference
+
+### Response trimming
+
+`get_ticket` and `get_ticket_conversations` accept a `mode` parameter (default `"slim"`). On heavy tickets with dozens of replies, slim mode is what keeps the response from blowing past usable context.
+
+In slim mode:
+
+- **Quoted reply chains and signatures are trimmed** from `body_text` / `description_text`. Recognizes Gmail / Apple Mail (`On <date>, <name> wrote:`), Outlook (`-----Original Message-----`, `From:` / `Sent:` / `To:` blocks, underscore dividers), and the RFC 3676 `--` signature delimiter.
+- **Routing metadata is dropped** — `to_emails`, `cc_emails`, `bcc_emails`, `support_email`, `source_additional_info`, escalation flags, sentiment scores, and other rarely-needed fields.
+- HTML bodies are stripped in favor of `_text` variants and attachment payloads collapse to `has_attachments` / `attachment_count`. (This also applies in full mode.)
+
+Pass `mode: "full"` to skip the trim and keep all metadata. Tool descriptions instruct the model to retry with full mode when the slim version is missing context — e.g. a reply references text that isn't visible, or the full CC list is needed.
+
+The trim is heuristic. If your team uses an email client that produces a reply marker not in the list above, slim mode will leave the chain intact; full mode is a harmless fallback.
+
+### Search query syntax
 
 Status codes: `2`=Open, `3`=Pending, `4`=Resolved, `5`=Closed
 Priority codes: `1`=Low, `2`=Medium, `3`=High, `4`=Urgent
@@ -91,11 +102,6 @@ Examples for `search_tickets`:
 - `requester_id:456` — tickets from a specific requester
 
 See the [Freshdesk filter docs](https://developers.freshdesk.com/api/#filter_tickets) for the full syntax.
-
-## Safety
-
-- `add_note` defaults `private: true`. Pass `private: false` explicitly to post a customer-visible note.
-- This server only exposes read + add-note. It does not expose ticket creation, status changes, replies to customers, or delete operations.
 
 ## License
 
