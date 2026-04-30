@@ -16,6 +16,19 @@ Runs locally as a stdio subprocess.
 
 Responses are slimmed to save context: HTML bodies are stripped in favor of `_text` variants, and attachment payloads are replaced with `has_attachments` / `attachment_count`.
 
+### Slim vs full mode
+
+`get_ticket` and `get_ticket_conversations` accept a `mode` parameter (default `"slim"`). On heavy tickets with dozens of replies, slim mode is what keeps the response from blowing past usable context.
+
+In slim mode:
+
+- **Quoted reply chains and signatures are trimmed** from `body_text` / `description_text`. The trim recognizes Gmail/Apple Mail (`On <date>, <name> wrote:`), Outlook (`-----Original Message-----`, `From:`/`Sent:`/`To:` blocks, underscore dividers), and the RFC 3676 `--` signature delimiter.
+- **Routing metadata is dropped** — `to_emails`, `cc_emails`, `bcc_emails`, `support_email`, `source_additional_info`, escalation flags, sentiment scores, and other rarely-needed fields.
+
+Pass `mode: "full"` to bypass both — bodies are returned untrimmed and all metadata is preserved. The tool descriptions instruct the model to retry with full mode automatically when the slim version is missing context (e.g. a reply references text that isn't visible, or the full CC list is needed).
+
+The trim is heuristic. If your team uses an email client that produces a reply marker not in the list above, slim mode may leave the quoted chain intact — falling back to full mode is harmless.
+
 ## Setup
 
 ### 1. Install
